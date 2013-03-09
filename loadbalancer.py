@@ -3,10 +3,11 @@
 from mininet.topo import Topo
 from mininet.net import Mininet
 from mininet.log import setLogLevel
-from mininet.node import OVSKernelSwitch
+from mininet.node import OVSKernelSwitch, RemoteController
 from mininet.cli import CLI
 from mininet.node import CPULimitedHost
 from mininet.link import TCLink
+from mininet.util import custom
 
 class myTopo(Topo):
 
@@ -16,16 +17,16 @@ class myTopo(Topo):
         Topo.__init__(self, **params)
 
         # Create Clients
-        hw = self.addHost('hw', cpu=.05)
-        hs = self.addHost('hs', cpu=.05)
-        ho1 = self.addHost('ho1', cpu=.05)
-        ho2 = self.addHost('ho2', cpu=.05)
+        hw = self.addHost('hw', cpu=.5, sched='cfs')
+        hs = self.addHost('hs', cpu=.5, sched='cfs')
+        ho1 = self.addHost('ho1', cpu=.5, sched='cfs')
+        ho2 = self.addHost('ho2', cpu=.5, sched='cfs')
 
         # Create servers
-        so = self.addHost('so', cpu=.2)
-        sn = self.addHost('sn', cpu=.3)
-        sne = self.addHost('sne', cpu=.2)
-        sse = self.addHost('sse', cpu=.1)
+        so = self.addHost('so', cpu=.1, sched='cfs')
+        sn = self.addHost('sn', cpu=.5, sched='cfs')
+        sne = self.addHost('sne', cpu=.3, sched='cfs')
+        sse = self.addHost('sse', cpu=.3, sched='cfs')
 
         # Create switches
         switches = [self.addSwitch('s%d' % i) for i in range(1, 10)]
@@ -93,14 +94,17 @@ def cntShut(net):
     pass
 
 if __name__ == '__main__':
-    setLogLevel('info')
-    net = customNet(host=CPULimitedHost, link=TCLink, switch=OVSKernelSwitch)
+    setLogLevel('debug')
+    net = customNet(host=CPULimitedHost, link=TCLink,
+            switch=OVSKernelSwitch,
+            controller=custom(RemoteController, ip='192.168.1.126', port=6633),
+            listenPort=6634)
     net.start()
 
     # Background traffic
-    backgroundTraffic(net)
+    #backgroundTraffic(net)
     #concerningTraffic(net)
     CLI(net)
-    bgtShut(net)
+    #bgtShut(net)
 
     net.stop()
