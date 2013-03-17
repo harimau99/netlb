@@ -36,14 +36,14 @@ class myTopo(Topo):
         self.addLink(switches[0], ho1)
         self.addLink(switches[0], switches[1])
         self.addLink(switches[1], ho2)
-        #self.addLink(switches[1], switches[2])
+        self.addLink(switches[1], switches[2])
         self.addLink(switches[1], switches[3])
         self.addLink(switches[1], switches[4], bw=100,
                 max_queue_size=10000, use_htb=True)
-        #self.addLink(switches[2], switches[3])
+        self.addLink(switches[2], switches[3])
         self.addLink(switches[2], switches[4])
         self.addLink(switches[2], switches[5])
-        #self.addLink(switches[3], switches[4])
+        self.addLink(switches[3], switches[4])
         self.addLink(switches[3], switches[6])
         self.addLink(switches[3], switches[7])
         self.addLink(switches[4], switches[8])
@@ -94,7 +94,7 @@ def cntShut(net):
     pass
 
 if __name__ == '__main__':
-    setLogLevel('debug')
+    setLogLevel('info')
     net = customNet(host=CPULimitedHost, link=TCLink,
             switch=OVSKernelSwitch,
             controller=custom(RemoteController, ip='192.168.1.126', port=6633),
