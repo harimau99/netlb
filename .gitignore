@@ -1,0 +1,13 @@
+README
+tags
+*.pem
+*.pyc
+*.pyo
+*.py~
+*.py.bak
+*.patch
+*.rej
+*.diff
+*.orig
+*.swp
+*.pcap
