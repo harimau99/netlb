@@ -28,7 +28,7 @@ import pox
 log = core.getLogger()
 
 from pox.lib.packet.ethernet import ethernet, ETHER_BROADCAST
-from pox.lib.packet.arp import arp
+from pox.lib.packet import arp, ipv4
 from pox.lib.addresses import IPAddr, EthAddr
 from pox.lib.util import dpid_to_str, str_to_bool
 from pox.lib.recoco import Timer
@@ -162,80 +162,113 @@ class ARPResponder (object):
       log.warning("%s: ignoring unparsed packet", dpid_to_str(dpid))
       return
 
-    a = packet.find('arp')
-    if not a: return
+    if isinstance(packet.next, arp):
+      a = packet.next
 
-    log.debug("%s ARP %s %s => %s", dpid_to_str(dpid),
-      {arp.REQUEST:"request",arp.REPLY:"reply"}.get(a.opcode,
-      'op:%i' % (a.opcode,)), str(a.protosrc), str(a.protodst))
-
-    if a.prototype == arp.PROTO_TYPE_IP:
-      if a.hwtype == arp.HW_TYPE_ETHERNET:
-        if a.protosrc != 0:
-
-          if _learn:
-            # Learn or update port/MAC info
-            if a.protosrc in _arp_table:
-              if _arp_table[a.protosrc] != a.hwsrc:
-                log.warn("%s RE-learned %s: %s->%s", (dpid_to_str(dpid),
-                    a.protosrc, _arp_table[a.protosrc], a.hwsrc))
-            else:
-              log.info("%s learned %s", dpid_to_str(dpid), a.protosrc)
-            _arp_table[a.protosrc] = Entry(a.hwsrc)
-
-          if a.opcode == arp.REQUEST:
-            # Maybe we can answer
-
-            if a.protodst in _arp_table:
-              # We have an answer...
-
-              r = arp()
-              r.hwtype = a.hwtype
-              r.prototype = a.prototype
-              r.hwlen = a.hwlen
-              r.protolen = a.protolen
-              r.opcode = arp.REPLY
-              r.hwdst = a.hwsrc
-              r.protodst = a.protosrc
-              r.protosrc = a.protodst
-              mac = _arp_table[a.protodst].mac
-              if mac is True:
-                # Special case -- use ourself
-                mac = _dpid_to_mac(dpid)
-              r.hwsrc = mac
-              e = ethernet(type=packet.type, src=_dpid_to_mac(dpid),
-                            dst=a.hwsrc)
-              e.payload = r
-              log.info("%s answering ARP for %s" % (dpid_to_str(dpid),
-                str(r.protosrc)))
-              msg = of.ofp_packet_out()
-              msg.data = e.pack()
-              msg.actions.append(of.ofp_action_output(port =
-                                                      of.OFPP_IN_PORT))
-              msg.in_port = inport
-              event.connection.send(msg)
-              return EventHalt if _eat_packets else None
-            else:
-              # Keep track of failed queries
-              squelch = a.protodst in _failed_queries
-              _failed_queries[a.protodst] = time.time()
-
-    # Didn't know how to handle this ARP, so just flood it
-    msg = "%s flooding ARP %s %s => %s" % (dpid_to_str(dpid),
+      log.debug("%s ARP %s %s => %s", dpid_to_str(dpid),
         {arp.REQUEST:"request",arp.REPLY:"reply"}.get(a.opcode,
-        'op:%i' % (a.opcode,)), a.protosrc, a.protodst)
+        'op:%i' % (a.opcode,)), str(a.protosrc), str(a.protodst))
 
-    if squelch:
-      log.debug(msg)
-    else:
-      log.info(msg)
+      if a.prototype == arp.PROTO_TYPE_IP:
+        if a.hwtype == arp.HW_TYPE_ETHERNET:
+          if a.protosrc != 0:
 
-    msg = of.ofp_packet_out()
-    msg.actions.append(of.ofp_action_output(port = of.OFPP_FLOOD))
-    msg.data = event.ofp
-    event.connection.send(msg.pack())
-    return EventHalt if _eat_packets else None
+            if _learn:
+              # Learn or update port/MAC info
+              if a.protosrc in _arp_table:
+                if _arp_table[a.protosrc] != a.hwsrc:
+                  log.warn("%s RE-learned %s: was at %s->now at %s", (dpid_to_str(dpid),
+                      a.protosrc, _arp_table[a.protosrc], a.hwsrc))
+              else:
+                log.info("%s learned %s is at %s", dpid_to_str(dpid), a.protosrc, a.hwsrc)
+              _arp_table[a.protosrc] = Entry(a.hwsrc)
 
+            if a.opcode == arp.REQUEST:
+              # Maybe we can answer
+
+              if a.protodst in _arp_table:
+                # We have an answer...
+
+                r = arp()
+                r.hwtype = a.hwtype
+                r.prototype = a.prototype
+                r.hwlen = a.hwlen
+                r.protolen = a.protolen
+                r.opcode = arp.REPLY
+                r.hwdst = a.hwsrc
+                r.protodst = a.protosrc
+                r.protosrc = a.protodst
+                mac = _arp_table[a.protodst].mac
+                if mac is True:
+                  # Special case -- use ourself
+                  mac = _dpid_to_mac(dpid)
+                r.hwsrc = mac
+                e = ethernet(type=packet.type, src=_dpid_to_mac(dpid),
+                              dst=a.hwsrc)
+                e.payload = r
+                log.info("%s answering ARP for %s" % (dpid_to_str(dpid),
+                  str(r.protosrc)))
+                msg = of.ofp_packet_out()
+                msg.data = e.pack()
+                msg.actions.append(of.ofp_action_output(port =
+                                                        of.OFPP_IN_PORT))
+                msg.in_port = inport
+                event.connection.send(msg)
+                return EventHalt if _eat_packets else None
+              else:
+                # Keep track of failed queries
+                squelch = a.protodst in _failed_queries
+                _failed_queries[a.protodst] = time.time()
+
+      """
+      if a.opcode == arp.REPLY:
+        msg = "%s flooding ARP %s %s => %s" % (dpid_to_str(dpid),
+            {arp.REQUEST:"request",arp.REPLY:"reply"}.get(a.opcode,
+            'op:%i' % (a.opcode,)), a.protosrc, a.protodst)
+
+        if squelch:
+          log.debug(msg)
+        else:
+          log.info(msg)
+
+        msg = of.ofp_packet_out()
+        msg.actions.append(of.ofp_action_output(port = of.OFPP_FLOOD))
+        msg.data = event.ofp
+        event.connection.send(msg.pack())
+        return EventHalt if _eat_packets else None
+      else:
+      """
+      # This ARP Proxy learns addresses, and replies to ARPs that it can answer.
+      # However it is not supposed to flood any ARP packets . The forwarding
+      # engine will do that.
+
+      # What's the difference between returning EventHalt/ND None? None
+      # means this event is not handled by this listener. Other listeners
+      # should continue processing it. Otherwise, the event is finished.
+      return None
+
+    elif isinstance(packet.next, ipv4):
+      # For now, mac_map in forwarding/l2_multi.py is static. It might change
+      # when hosts move around. But it won't timeout. As long as two hosts have
+      # exchanged ARP packets, their locations will be learned by the controller.
+      # Other flows between them will go through the data plane by setting up
+      # 'paths'. So the ARP Proxy will NOT be able to intercept these packets
+      # and update their ARP entries.
+      ip = packet.next
+      log.debug("%s IP %s => %s only for address learning", dpid_to_str(dpid),
+                ip.srcip, ip.dstip)
+
+      if _learn:
+        if ip.srcip in _arp_table:
+          if _arp_table[ip.srcip] != packet.src:
+            log.warn("%s RE-learned %s: was at %s->now at %s",
+              dpid_to_str(dpid), ip.srcip, _arp_table[ip.srcip], packet.src)
+        else:
+          log.info("%s learned %s is at %s", dpid_to_str(dpid), ip.srcip,
+            packet.src)
+          _arp_table[ip.srcip] = Entry(packet.src)
+      # This ipv4 packet is only for ARP learning, will not process it.
+      return None
 
 _arp_table = ARPTable() # IPAddr -> Entry
 _install_flow = None
@@ -243,7 +276,10 @@ _eat_packets = None
 _failed_queries = {} # IP -> time : queries we couldn't answer
 _learn = None
 
-def launch (timeout=ARP_TIMEOUT, no_flow=False, eat_packets=True,
+# I changed the default value of no_flow to True. Thus the ARP->Controller
+# flow will not be installed. ARP replies can/ND should be correctly
+# 'routed' by the forwarding engine.
+def launch (timeout=ARP_TIMEOUT, no_flow=True, eat_packets=True,
             no_learn=False, **kw):
   global ARP_TIMEOUT, _install_flow, _eat_packets, _learn
   ARP_TIMEOUT = timeout
