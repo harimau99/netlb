@@ -30,16 +30,38 @@ Depends on openflow.discovery
 Works with openflow.spanning_tree
 """
 
+"""
+A load balancer, based on l2_multi, which picks a server in a Round-Robin
+way. Then try to find the 'best' path to that server.
+
+The arp_responder looks nice. But there are some things missing:
+  1) It learns addresses ONLY by looking at ARP packets. The entries will
+  time out too fast. A work-around will be to look both ARP and IP packets.
+  2) When a client ARPs for a Virtual Server mac address, the arp_responder
+  will never be able to answer. It doesn't send out ARP requests. Even if
+  it does, the virtual server doesn't exist so the ARP requests will never
+  be replied. So the controller is supposed to intercept these ARP requests
+  and reply them with MAC addresses of the real server.
+
+"""
+
 from pox.core import core
 import pox.openflow.libopenflow_01 as of
 from pox.lib.revent import *
 from pox.lib.recoco import Timer
 from collections import defaultdict
 from pox.openflow.discovery import Discovery
+from pox.lib.addresses import IPAddr, EthAddr
 from pox.lib.util import dpid_to_str
 import time
 
 log = core.getLogger()
+
+# Virtual Server
+virtual_server = None
+
+# Real Servers
+real_servers = {}
 
 # Adjacency map.  [sw1][sw2] -> port from sw1 to sw2
 adjacency = defaultdict(lambda:defaultdict(lambda:None))
@@ -251,6 +273,50 @@ class Switch (EventMixin):
     msg.buffer_id = buf
     switch.connection.send(msg)
 
+  def _install_mod_nw (self, sw, in_port, out_port, match, ip, reverse=False):
+    msg = of.ofp_flow_mod()
+    msg.match = match
+    msg.match.in_port = in_port
+    msg.idle_timeout = FLOW_IDLE_TIMEOUT
+    msg.hard_timeout = FLOW_HARD_TIMEOUT
+    if not reverse:
+      msg.actions.append(of.ofp_action_nw_addr.set_dst(nw_addr = ip))
+    else:
+      msg.actions.append(of.ofp_action_nw_addr.set_src(nw_addr = ip))
+    msg.actions.append(of.ofp_action_output(port = out_port))
+    msg.buffer_id = None
+    sw.connection.send(msg)
+
+  def _install_path_mod_dst (self, p, match, target_ip, packet_in=None):
+    wp = WaitingPath(p, packet_in)
+    _sw, _in_port, _out_port = p[0]
+    self._install_mod_nw(_sw, _in_port, _out_port, match, target_ip)
+    msg = of.ofp_barrier_request()
+    _sw.connection.send(msg)
+    wp.add_xid(_sw.dpid,msg.xid)
+
+    match.set_nw_dst(target_ip)
+    for sw,in_port,out_port in p[1:]:
+      self._install(sw, in_port, out_port, match)
+      msg = of.ofp_barrier_request()
+      sw.connection.send(msg)
+      wp.add_xid(sw.dpid,msg.xid)
+
+  def _install_path_mod_src (self, p, match, target_ip, packet_in=None):
+    wp = WaitingPath(p, packet_in)
+    _sw, _in_port, _out_port = p[0]
+    self._install_mod_nw(_sw, _in_port, _out_port, match, target_ip,
+                         reverse=True)
+    msg = of.ofp_barrier_request()
+    _sw.connection.send(msg)
+    wp.add_xid(_sw.dpid,msg.xid)
+
+    for sw,in_port,out_port in p[1:]:
+      self._install(sw, in_port, out_port, match)
+      msg = of.ofp_barrier_request()
+      sw.connection.send(msg)
+      wp.add_xid(sw.dpid,msg.xid)
+
   def _install_path (self, p, match, packet_in=None):
     wp = WaitingPath(p, packet_in)
     for sw,in_port,out_port in p:
@@ -275,7 +341,6 @@ class Switch (EventMixin):
         log.debug("Dest unreachable (%s -> %s)",
                   match.dl_src, match.dl_dst)
 
-        from pox.lib.addresses import EthAddr
         e = pkt.ethernet()
         e.src = EthAddr(dpid_to_str(self.dpid)) #FIXME: Hmm...
         e.dst = match.dl_src
@@ -303,16 +368,32 @@ class Switch (EventMixin):
 
       return
 
-    log.debug("Installing path for %s -> %s %04x (%i hops)",
-        match.dl_src, match.dl_dst, match.dl_type, len(p))
+    if match.nw_dst in virtual_server:
+      vs_ip = match.nw_dst
+      rs_ip = real_servers.get(match.dl_dst)
+      log.debug("Virtual server path %s -> %s(serving by %s, %i hops)",
+                match.nw_src, match.nw_dst, rs_ip, len(p))
+      self._install_path_mod_dst(p, match.clone(), rs_ip, event.ofp)
 
-    # We have a path -- install it
-    self._install_path(p, match, event.ofp)
+      # Now reverse it and install it backwards
+      # Works well for IPv4 packets
+      # The packet coming back is from the real server. Re-write header
+      # on the last hop.
+      p = [(sw,out_port,in_port) for sw,in_port,out_port in p]
+      match.set_nw_dst(rs_ip)
+      self._install_path_mod_src(p, match.flip(), vs_ip)
 
-    # Now reverse it and install it backwards
-    # (we'll just assume that will work)
-    p = [(sw,out_port,in_port) for sw,in_port,out_port in p]
-    self._install_path(p, match.flip())
+    else:
+      log.debug("Installing path for %s -> %s %04x (%i hops)",
+          match.dl_src, match.dl_dst, match.dl_type, len(p))
+
+      # We have a path -- install it
+      self._install_path(p, match, event.ofp)
+
+      # Now reverse it and install it backwards
+      # (we'll just assume that will work)
+      p = [(sw,out_port,in_port) for sw,in_port,out_port in p]
+      self._install_path(p, match.flip())
 
 
   def _handle_PacketIn (self, event):
@@ -506,7 +587,12 @@ class l2_multi (EventMixin):
     wp.notify(event)
 
 
-def launch ():
+def launch (virtual_servers = "", **kw):
+  global virtual_server, real_servers
+  virtual_server = [IPAddr(x) for x in
+                    virtual_servers.replace(",", " ").split()]
+  for mac, ip in kw.iteritems():
+    real_servers[EthAddr(mac)] = IPAddr(ip)
   core.registerNew(l2_multi)
 
   timeout = min(max(PATH_SETUP_TIME, 5) * 2, 15)
