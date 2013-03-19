@@ -67,6 +67,9 @@ class Entry (object):
   def __ne__ (self, other):
     return not self.__eq__(other)
 
+  def __str__ (self):
+    return str(self.mac)
+
   @property
   def is_expired (self):
     if self.static: return False
@@ -128,6 +131,10 @@ def _handle_expiration ():
     if time.time() - t > ARP_TIMEOUT:
       del _failed_queries[k]
 
+def _pick_real_server ():
+  # FIXME need more work here
+  for real_server in _real_servers:
+    return real_server
 
 class ARPResponder (object):
   def __init__ (self):
@@ -139,6 +146,10 @@ class ARPResponder (object):
   def _handle_GoingUpEvent (self, event):
     core.openflow.addListeners(self)
     log.debug("Up...")
+    # We are expecting at least one real server if there is one or more
+    # virtual servers
+    if len(_virtual_servers) > 0 and len(_real_servers) == 0:
+      log.info("Do you miss real server configuration?")
 
   def _handle_ConnectionUp (self, event):
     if _install_flow:
@@ -186,7 +197,7 @@ class ARPResponder (object):
             if a.opcode == arp.REQUEST:
               # Maybe we can answer
 
-              if a.protodst in _arp_table:
+              if a.protodst in _arp_table or a.protodst in _virtual_servers:
                 # We have an answer...
 
                 r = arp()
@@ -198,10 +209,21 @@ class ARPResponder (object):
                 r.hwdst = a.hwsrc
                 r.protodst = a.protosrc
                 r.protosrc = a.protodst
-                mac = _arp_table[a.protodst].mac
-                if mac is True:
-                  # Special case -- use ourself
-                  mac = _dpid_to_mac(dpid)
+
+                # We use L2 routing. For each ARP request for a virtual server, we reply it
+                # with MAC address of a real server
+                if a.protodst in _virtual_servers:
+                  server_ip = _pick_real_server()
+                  # We assume that each real server has a static ARP entry.
+                  mac = _arp_table[server_ip].mac
+                  log.info("ARP request for VS %s, answering with %s at %s", a.protodst,
+                          server_ip, mac)
+                else:
+                  mac = _arp_table[a.protodst].mac
+                  if mac is True:
+                    # Special case -- use ourself
+                    mac = _dpid_to_mac(dpid)
+
                 r.hwsrc = mac
                 e = ethernet(type=packet.type, src=_dpid_to_mac(dpid),
                               dst=a.hwsrc)
@@ -275,20 +297,26 @@ _install_flow = None
 _eat_packets = None
 _failed_queries = {} # IP -> time : queries we couldn't answer
 _learn = None
+_virtual_servers = None
+_real_servers = set()
 
 # I changed the default value of no_flow to True. Thus the ARP->Controller
 # flow will not be installed. ARP replies can/ND should be correctly
 # 'routed' by the forwarding engine.
 def launch (timeout=ARP_TIMEOUT, no_flow=True, eat_packets=True,
-            no_learn=False, **kw):
-  global ARP_TIMEOUT, _install_flow, _eat_packets, _learn
+            no_learn=False, virtual_servers="", **kw):
+  global ARP_TIMEOUT, _install_flow, _eat_packets, _learn, \
+      _virtual_servers, _real_servers
   ARP_TIMEOUT = timeout
   _install_flow = not no_flow
   _eat_packets = str_to_bool(eat_packets)
   _learn = not no_learn
+  _virtual_servers = set([IPAddr(k) for k in
+                          virtual_servers.replace(",", " ").split()])
 
   core.Interactive.variables['arp'] = _arp_table
   for k,v in kw.iteritems():
     _arp_table[IPAddr(k)] = Entry(v, static=True)
+    _real_servers.add(IPAddr(k))
   core.registerNew(ARPResponder)
 
