@@ -575,6 +575,12 @@ class l2_multi (EventMixin):
       sw = Switch()
       switches[event.dpid] = sw
       sw.connect(event.connection)
+      # dpid for switch-9
+      if event.dpid == 9:
+        log.info("Hacking here, add a static mac_map entry %s",
+                dpid_to_str(event.dpid))
+        # 2 for the port where sn is connected to s9
+        mac_map[EthAddr('00:00:00:00:00:05')] = (sw, 2)
     else:
       sw.connect(event.connection)
 
