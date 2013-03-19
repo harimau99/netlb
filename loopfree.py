@@ -96,7 +96,7 @@ def cntShut(net):
 if __name__ == '__main__':
     setLogLevel('info')
     net = customNet(host=CPULimitedHost, link=TCLink,
-            switch=OVSKernelSwitch,
+            switch=OVSKernelSwitch, autoSetMacs=True,
             controller=custom(RemoteController, ip='192.168.1.126', port=6633),
             listenPort=6634)
     net.start()
