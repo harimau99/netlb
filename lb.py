@@ -450,6 +450,14 @@ class Switch (EventMixin):
         #drop()
         #return
 
+    # Eat ARP replies from real servers on initialization
+    from pox.lib.packet import arp
+    from pox.lib.packet.ethernet import ETHER_ANY
+    from pox.lib.addresses import IP_ANY
+    if (packet.find('arp') and packet.next.opcode == arp.REPLY and
+        packet.next.protodst == IP_ANY and
+        packet.next.hwdst == ETHER_ANY):
+      return
 
     if packet.dst.is_multicast:
       log.debug("Flood multicast from %s", packet.src)
