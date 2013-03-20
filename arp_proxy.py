@@ -27,9 +27,9 @@ from pox.core import core
 import pox
 log = core.getLogger()
 
-from pox.lib.packet.ethernet import ethernet, ETHER_BROADCAST
+from pox.lib.packet.ethernet import ethernet, ETHER_ANY, ETHER_BROADCAST
 from pox.lib.packet import arp, ipv4
-from pox.lib.addresses import IPAddr, EthAddr
+from pox.lib.addresses import IPAddr, EthAddr, IP_ANY
 from pox.lib.util import dpid_to_str, str_to_bool
 from pox.lib.recoco import Timer
 from pox.lib.revent import EventHalt
@@ -136,10 +136,48 @@ def _pick_real_server ():
   for real_server in _real_servers:
     return real_server
 
+def _arp_for_real_servers ():
+  for rs in [server for server in _real_servers
+             if server not in _arp_table]:
+    log.debug("ARPing in UpEvent for real server %s", str(rs))
+    q = arp()
+    q.opcode = arp.REQUEST
+    q.protodst = rs
+
+    con = None
+    for con in core.openflow.connections:
+      if con is not None:
+        break
+    else:
+      log.info("can't get any connection")
+      return True
+
+    e = ethernet(type=ethernet.ARP_TYPE, dst=ETHER_BROADCAST)
+    e.payload = q
+    log.debug("%s ARPing in UpEvent for real server %s",
+              dpid_to_str(con.dpid), str(rs))
+    msg = of.ofp_packet_out()
+    msg.data = e.pack()
+    msg.actions.append(of.ofp_action_output(port = of.OFPP_FLOOD))
+    # FIXME assume port number starts from 1
+    # There will be a problem if port 1 is the
+    # only port that will join flooding (spanning_tree)
+    msg.in_port = 1
+    con.send(msg)
+
+  res = False
+  for server in _real_servers:
+    if server not in _arp_table:
+      res = True
+      break
+  return res
+
 class ARPResponder (object):
   def __init__ (self):
     # This timer handles expiring stuff
     self._expire_timer = Timer(5, _handle_expiration, recurring=True)
+    self._arp_timer = Timer(3, _arp_for_real_servers, recurring=True,
+                            selfStoppable=True)
 
     core.addListeners(self)
 
@@ -188,11 +226,19 @@ class ARPResponder (object):
               # Learn or update port/MAC info
               if a.protosrc in _arp_table:
                 if _arp_table[a.protosrc] != a.hwsrc:
-                  log.warn("%s RE-learned %s: was at %s->now at %s", (dpid_to_str(dpid),
-                      a.protosrc, _arp_table[a.protosrc], a.hwsrc))
+                  log.warn("%s RE-learned %s: was at %s->now at %s",
+                           (dpid_to_str(dpid), a.protosrc,
+                            _arp_table[a.protosrc], a.hwsrc))
               else:
-                log.info("%s learned %s is at %s", dpid_to_str(dpid), a.protosrc, a.hwsrc)
-              _arp_table[a.protosrc] = Entry(a.hwsrc)
+                log.info("%s learned %s is at %s", dpid_to_str(dpid),
+                         a.protosrc, a.hwsrc)
+
+              if a.protosrc not in _real_servers:
+                _arp_table[a.protosrc] = Entry(a.hwsrc)
+              else:
+                # Static ARP entries for real servers
+                _arp_table.set(a.protosrc, a.hwsrc, static=True)
+
 
             if a.opcode == arp.REQUEST:
               # Maybe we can answer
@@ -304,7 +350,7 @@ _real_servers = set()
 # flow will not be installed. ARP replies can/ND should be correctly
 # 'routed' by the forwarding engine.
 def launch (timeout=ARP_TIMEOUT, no_flow=True, eat_packets=True,
-            no_learn=False, virtual_servers="", **kw):
+            no_learn=False, virtual_servers="", real_servers=""):
   global ARP_TIMEOUT, _install_flow, _eat_packets, _learn, \
       _virtual_servers, _real_servers
   ARP_TIMEOUT = timeout
@@ -315,8 +361,7 @@ def launch (timeout=ARP_TIMEOUT, no_flow=True, eat_packets=True,
                           virtual_servers.replace(",", " ").split()])
 
   core.Interactive.variables['arp'] = _arp_table
-  for k,v in kw.iteritems():
-    _arp_table[IPAddr(k)] = Entry(v, static=True)
-    _real_servers.add(IPAddr(k))
+  _real_servers.update([IPAddr(k) for k in
+                        real_servers.replace(",", " ").split()])
   core.registerNew(ARPResponder)
 
