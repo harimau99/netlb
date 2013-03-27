@@ -96,20 +96,29 @@ def _calc_paths ():
 
   def dump ():
     for i in sws:
+      line = ""
       for j in sws:
         a = path_map[i][j][0]
         #a = adjacency[i][j]
-        if a is None: a = "*"
-        print a,
-      print
+        if a is None:
+          line += "*"*9 + "  "
+        else:
+          line += "%.7f" % a + "  "
+      log.debug("%s", line)
 
   sws = switches.values()
   path_map.clear()
   for k in sws:
     for j,port in adjacency[k].iteritems():
       if port is None: continue
-      path_map[k][j] = (1,None)
-    path_map[k][k] = (0,None) # distance, intermediate
+      #path_map[k][j] = (1,None)
+      used = core.openflow_link_monitor.link_util[k.dpid][port]['tx']
+      if used >= 100.0:
+        cost = 100.0
+      else:
+        cost = 100.0/(100.0 - used)
+      path_map[k][j] = (cost,None)
+    path_map[k][k] = (0.0,None) # distance, intermediate
 
   #dump()
 
@@ -268,7 +277,6 @@ class Switch (EventMixin):
     msg.match = match
     msg.match.in_port = in_port
     msg.idle_timeout = FLOW_IDLE_TIMEOUT
-    msg.hard_timeout = FLOW_HARD_TIMEOUT
     msg.actions.append(of.ofp_action_output(port = out_port))
     msg.buffer_id = buf
     switch.connection.send(msg)
@@ -278,7 +286,6 @@ class Switch (EventMixin):
     msg.match = match
     msg.match.in_port = in_port
     msg.idle_timeout = FLOW_IDLE_TIMEOUT
-    msg.hard_timeout = FLOW_HARD_TIMEOUT
     if not reverse:
       msg.actions.append(of.ofp_action_nw_addr.set_dst(nw_addr = ip))
     else:
@@ -512,7 +519,12 @@ class l2_multi (EventMixin):
     def startup ():
       core.openflow.addListeners(self, priority=0)
       core.openflow_discovery.addListeners(self)
-    core.call_when_ready(startup, ('openflow','openflow_discovery'))
+      core.openflow_link_monitor.addListeners(self)
+    core.call_when_ready(startup, ('openflow','openflow_discovery',
+                                   'openflow_link_monitor'))
+
+  def _handle_LinkStatsUpdated (self, event):
+    _calc_paths()
 
   def _handle_LinkEvent (self, event):
     def flip (link):
