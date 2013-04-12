@@ -36,7 +36,7 @@ class StatsReplyCounter (object):
 
   def clear (self):
     self.cnt = 0
-    self.timer = Timer(5, self._stats_reply_timeout)
+    self.timer = Timer(3, self._stats_reply_timeout)
 
 cnt = StatsReplyCounter()
 
@@ -85,8 +85,8 @@ class LinkMonitor (EventMixin):
       # filtering out the local port number 65534
       if port_no < 48:
         # Calculate link utilization
-        self.link_util[dpid][port_no]['rx'] = (stat['rx_bytes'] - self._port_stats[dpid][port_no]['rx']) * 8.0 / (25.0 * 1000000.0)
-        self.link_util[dpid][port_no]['tx'] = (stat['tx_bytes'] - self._port_stats[dpid][port_no]['tx']) * 8.0 / (25.0 * 1000000.0)
+        self.link_util[dpid][port_no]['rx'] = (stat['rx_bytes'] - self._port_stats[dpid][port_no]['rx']) * 8.0 / (5.0 * 1000000.0)
+        self.link_util[dpid][port_no]['tx'] = (stat['tx_bytes'] - self._port_stats[dpid][port_no]['tx']) * 8.0 / (5.0 * 1000000.0)
         #log.debug("%s %i RX capacity used %.7f", dpid_to_str(dpid), port_no, self.link_util[dpid][port_no]['rx'])
         #log.debug("%s %i TX capacity used %.7f", dpid_to_str(dpid), port_no, self.link_util[dpid][port_no]['tx'])
         # Update port stats
@@ -96,4 +96,4 @@ class LinkMonitor (EventMixin):
 
 def launch ():
   core.registerNew(LinkMonitor)
-  Timer(25, _periodic_port_stats_req, recurring=True)
+  Timer(5, _periodic_port_stats_req, recurring=True)

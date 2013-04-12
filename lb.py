@@ -106,6 +106,8 @@ def _calc_paths ():
           line += "%.7f" % a + "  "
       log.debug("%s", line)
 
+  BANDWIDTH = 50.0
+  MAXUSAGE = 1000.0
   sws = switches.values()
   path_map.clear()
   for k in sws:
@@ -113,14 +115,14 @@ def _calc_paths ():
       if port is None: continue
       #path_map[k][j] = (1,None)
       used = core.openflow_link_monitor.link_util[k.dpid][port]['tx']
-      if used >= 100.0:
-        cost = 100.0
+      if used >= BANDWIDTH:
+        cost = MAXUSAGE
       else:
-        cost = 100.0/(100.0 - used)
+        cost = min(BANDWIDTH/(BANDWIDTH - used), MAXUSAGE)
       path_map[k][j] = (cost,None)
     path_map[k][k] = (0.0,None) # distance, intermediate
 
-  #dump()
+  dump()
 
   for k in sws:
     for i in sws:
@@ -134,7 +136,7 @@ def _calc_paths ():
               path_map[i][j] = (ikj_dist, k)
 
   #print "--------------------"
-  #dump()
+  dump()
 
 
 def _get_raw_path (src, dst):
