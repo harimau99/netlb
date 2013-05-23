@@ -131,11 +131,6 @@ def _handle_expiration ():
     if time.time() - t > ARP_TIMEOUT:
       del _failed_queries[k]
 
-def _pick_real_server ():
-  # FIXME need more work here
-  for real_server in _real_servers:
-    return real_server
-
 def _arp_for_real_servers ():
   for rs in [server for server in _real_servers
              if server not in _arp_table]:
@@ -173,11 +168,12 @@ def _arp_for_real_servers ():
   return res
 
 class ARPResponder (object):
-  def __init__ (self):
+  def __init__ (self, generator):
     # This timer handles expiring stuff
     self._expire_timer = Timer(5, _handle_expiration, recurring=True)
     self._arp_timer = Timer(3, _arp_for_real_servers, recurring=True,
                             selfStoppable=True)
+    self._pick_real_server = generator
 
     core.addListeners(self)
 
@@ -259,7 +255,7 @@ class ARPResponder (object):
                 # We use L2 routing. For each ARP request for a virtual server, we reply it
                 # with MAC address of a real server
                 if a.protodst in _virtual_servers:
-                  server_ip = _pick_real_server()
+                  server_ip = self._pick_real_server.next()
                   # We assume that each real server has a static ARP entry.
                   mac = _arp_table[server_ip].mac
                   log.info("ARP request for VS %s, answering with %s at %s", a.protodst,
@@ -338,6 +334,23 @@ class ARPResponder (object):
       # This ipv4 packet is only for ARP learning, will not process it.
       return None
 
+class Schedulers (object):
+  def __init__ (self, real_servers):
+      self._algorithms = {}
+      self._real_servers = real_servers
+
+  def register (self, algor):
+      self._algorithms[algor.name] = algor.server_picker(self._real_servers)
+
+  def _is_valid_sched (self, name):
+      return name in self._algorithms
+
+  def get_sche (self, name):
+      if self._is_valid_sched(name):
+          return self._algorithms[name]
+      else:
+          return None
+
 _arp_table = ARPTable() # IPAddr -> Entry
 _install_flow = None
 _eat_packets = None
@@ -346,11 +359,22 @@ _learn = None
 _virtual_servers = None
 _real_servers = set()
 
+class RoundRobin (object):
+    def __init__ (self):
+        self.name = "rr"
+    # a generator
+    def server_picker (self, real_servers):
+        while True:
+            for real_server in real_servers:
+                yield real_server
+
+# Register other algorithms here
+
 # I changed the default value of no_flow to True. Thus the ARP->Controller
 # flow will not be installed. ARP replies can/ND should be correctly
 # 'routed' by the forwarding engine.
 def launch (timeout=ARP_TIMEOUT, no_flow=True, eat_packets=True,
-            no_learn=False, virtual_servers="", real_servers=""):
+            no_learn=False, virtual_servers="", real_servers="", sa="rr"):
   global ARP_TIMEOUT, _install_flow, _eat_packets, _learn, \
       _virtual_servers, _real_servers
   ARP_TIMEOUT = timeout
@@ -363,5 +387,12 @@ def launch (timeout=ARP_TIMEOUT, no_flow=True, eat_packets=True,
   core.Interactive.variables['arp'] = _arp_table
   _real_servers.update([IPAddr(k) for k in
                         real_servers.replace(",", " ").split()])
-  core.registerNew(ARPResponder)
 
+  schedulers = Schedulers(_real_servers)
+  schedulers.register(RoundRobin())
+
+  if not schedulers.get_sche(sa):
+      log.info("Falling back to Round Robin Scheduling")
+      core.registerNew(ARPResponder, schedulers.get_sche("rr"))
+  else:
+      core.registerNew(ARPResponder, schedulers.get_sche(sa))
