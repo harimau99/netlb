@@ -1,0 +1,20 @@
+1. git clone https://github.com/minchnew/pox.git
+2. git clone -b carp https://github.com/minchnew/netlb.git ./ext
+3. 
+./pox.py --verbose \
+    openflow.discovery --explicit_drop='False' --link_timeout=60 \
+    openflow.spanning_tree --no_flood='True' --hold_down='True' \
+    link_monitor --bandwidth=50 \
+    misc.arp_responder --'10.0.2.1'='00:00:0a:00:02:01' --no_flow='True' --servers='10.0.0.2,10.0.0.3,10.0.0.4' \
+    server_sched --servers='10.0.0.2,10.0.0.3,10.0.0.4' \
+    lb --ip='10.0.2.1' --servers='10.0.0.2,10.0.0.3,10.0.0.4' --bandwidth=50 \
+    log --file=pox.log,w \
+    py
+
+# Notes on command line options:
+
+You must specify real server IP addresses and a pair of virtual service 
+addresses when launching those modules. For example, the above load 
+balancer instance is using a VIRTUAL SERVICE IP address of 10.0.2.1 and
+there are three real servers in total. You also have to match the
+bandwidth option against your Mininet link speed.
