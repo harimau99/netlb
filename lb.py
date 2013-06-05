@@ -53,15 +53,16 @@ from collections import defaultdict
 from pox.openflow.discovery import Discovery
 from pox.lib.addresses import IPAddr, EthAddr
 from pox.lib.util import dpid_to_str
+from pox.lib.packet import arp
+from pox.lib.packet.ethernet import ETHER_ANY
+from pox.lib.addresses import IP_ANY
 import time
 
 log = core.getLogger()
 
 # Virtual Server
 virtual_server = None
-
-# Real Servers
-real_servers = {}
+real_servers = None
 
 # Adjacency map.  [sw1][sw2] -> port from sw1 to sw2
 adjacency = defaultdict(lambda:defaultdict(lambda:None))
@@ -88,6 +89,7 @@ FLOW_HARD_TIMEOUT = 30
 # How long is allowable to set up a path?
 PATH_SETUP_TIME = 4
 
+BANDWIDTH = 100.0
 
 def _calc_paths ():
   """
@@ -106,19 +108,15 @@ def _calc_paths ():
           line += "%.7f" % a + "  "
       log.debug("%s", line)
 
-  BANDWIDTH = 50.0
-  MAXUSAGE = 1000.0
+  MAXUSAGE = .99
   sws = switches.values()
   path_map.clear()
   for k in sws:
     for j,port in adjacency[k].iteritems():
       if port is None: continue
       #path_map[k][j] = (1,None)
-      used = core.openflow_link_monitor.link_util[k.dpid][port]['tx']
-      if used >= BANDWIDTH:
-        cost = MAXUSAGE
-      else:
-        cost = min(BANDWIDTH/(BANDWIDTH - used), MAXUSAGE)
+      used = core.lblm.link_util[k.dpid][port]['tx']
+      cost = min(MAXUSAGE, used)
       path_map[k][j] = (cost,None)
     path_map[k][k] = (0.0,None) # distance, intermediate
 
@@ -283,38 +281,41 @@ class Switch (EventMixin):
     msg.buffer_id = buf
     switch.connection.send(msg)
 
-  def _install_mod_nw (self, sw, in_port, out_port, match, ip, reverse=False):
+  def _install_mod_nw (self, sw, in_port, out_port, match, ip, mac, reverse=False):
     msg = of.ofp_flow_mod()
     msg.match = match
     msg.match.in_port = in_port
     msg.idle_timeout = FLOW_IDLE_TIMEOUT
     if not reverse:
-      msg.actions.append(of.ofp_action_nw_addr.set_dst(nw_addr = ip))
+      msg.actions.append(of.ofp_action_dl_addr.set_dst(mac))
+      msg.actions.append(of.ofp_action_nw_addr.set_dst(ip))
     else:
-      msg.actions.append(of.ofp_action_nw_addr.set_src(nw_addr = ip))
+      msg.actions.append(of.ofp_action_dl_addr.set_src(mac))
+      msg.actions.append(of.ofp_action_nw_addr.set_src(ip))
     msg.actions.append(of.ofp_action_output(port = out_port))
     msg.buffer_id = None
     sw.connection.send(msg)
 
-  def _install_path_mod_dst (self, p, match, target_ip, packet_in=None):
+  def _install_path_mod_dst (self, p, match, target_ip, target_mac, packet_in=None):
     wp = WaitingPath(p, packet_in)
     _sw, _in_port, _out_port = p[0]
-    self._install_mod_nw(_sw, _in_port, _out_port, match, target_ip)
+    self._install_mod_nw(_sw, _in_port, _out_port, match, target_ip, target_mac)
     msg = of.ofp_barrier_request()
     _sw.connection.send(msg)
     wp.add_xid(_sw.dpid,msg.xid)
 
     match.set_nw_dst(target_ip)
+    match.dl_dst = target_mac
     for sw,in_port,out_port in p[1:]:
       self._install(sw, in_port, out_port, match)
       msg = of.ofp_barrier_request()
       sw.connection.send(msg)
       wp.add_xid(sw.dpid,msg.xid)
 
-  def _install_path_mod_src (self, p, match, target_ip, packet_in=None):
+  def _install_path_mod_src (self, p, match, target_ip, target_mac, packet_in=None):
     wp = WaitingPath(p, packet_in)
     _sw, _in_port, _out_port = p[0]
-    self._install_mod_nw(_sw, _in_port, _out_port, match, target_ip,
+    self._install_mod_nw(_sw, _in_port, _out_port, match, target_ip, target_mac,
                          reverse=True)
     msg = of.ofp_barrier_request()
     _sw.connection.send(msg)
@@ -333,6 +334,66 @@ class Switch (EventMixin):
       msg = of.ofp_barrier_request()
       sw.connection.send(msg)
       wp.add_xid(sw.dpid,msg.xid)
+
+  def install_path2 (self, dst_sw, last_port, match, event, rs_ip, rs_mac):
+    """
+    Attempts to install a path between this switch and some destination
+    """
+    p = _get_path(self, dst_sw, event.port, last_port)
+    if p is None:
+      log.warning("Can't get from %s to %s", match.dl_src, match.dl_dst)
+
+      import pox.lib.packet as pkt
+
+      if (match.dl_type == pkt.ethernet.IP_TYPE and
+          event.parsed.find('ipv4')):
+        # It's IP -- let's send a destination unreachable
+        log.debug("Dest unreachable (%s -> %s)",
+                  match.dl_src, match.dl_dst)
+
+        e = pkt.ethernet()
+        e.src = EthAddr(dpid_to_str(self.dpid)) #FIXME: Hmm...
+        e.dst = match.dl_src
+        e.type = e.IP_TYPE
+        ipp = pkt.ipv4()
+        ipp.protocol = ipp.ICMP_PROTOCOL
+        ipp.srcip = match.nw_dst #FIXME: Ridiculous
+        ipp.dstip = match.nw_src
+        icmp = pkt.icmp()
+        icmp.type = pkt.ICMP.TYPE_DEST_UNREACH
+        icmp.code = pkt.ICMP.CODE_UNREACH_HOST
+        orig_ip = event.parsed.find('ipv4')
+
+        d = orig_ip.pack()
+        d = d[:orig_ip.hl * 4 + 8]
+        import struct
+        d = struct.pack("!HH", 0,0) + d #FIXME: MTU
+        icmp.payload = d
+        ipp.payload = icmp
+        e.payload = ipp
+        msg = of.ofp_packet_out()
+        msg.actions.append(of.ofp_action_output(port = event.port))
+        msg.data = e.pack()
+        self.connection.send(msg)
+
+      return
+
+    log.info("Path found")
+    vs_ip = match.nw_dst
+    vs_mac = match.dl_dst
+
+    log.debug("Virtual server path %s -> %s(serving by %s, %i hops)",
+              match.nw_src, match.nw_dst, rs_ip, len(p))
+    self._install_path_mod_dst(p, match.clone(), rs_ip, rs_mac, event.ofp)
+
+    # Now reverse it and install it backwards
+    # Works well for IPv4 packets
+    # The packet coming back is from the real server. Re-write header
+    # on the last hop.
+    p = [(sw,out_port,in_port) for sw,in_port,out_port in p]
+    match.set_nw_dst(rs_ip)
+    match.dl_dst = rs_mac
+    self._install_path_mod_src(p, match.flip(), vs_ip, vs_mac)
 
   def install_path (self, dst_sw, last_port, match, event):
     """
@@ -377,32 +438,16 @@ class Switch (EventMixin):
 
       return
 
-    if match.nw_dst in virtual_server:
-      vs_ip = match.nw_dst
-      rs_ip = real_servers.get(match.dl_dst)
-      log.debug("Virtual server path %s -> %s(serving by %s, %i hops)",
-                match.nw_src, match.nw_dst, rs_ip, len(p))
-      self._install_path_mod_dst(p, match.clone(), rs_ip, event.ofp)
+    log.debug("Installing path for %s -> %s %04x (%i hops)",
+        match.dl_src, match.dl_dst, match.dl_type, len(p))
 
-      # Now reverse it and install it backwards
-      # Works well for IPv4 packets
-      # The packet coming back is from the real server. Re-write header
-      # on the last hop.
-      p = [(sw,out_port,in_port) for sw,in_port,out_port in p]
-      match.set_nw_dst(rs_ip)
-      self._install_path_mod_src(p, match.flip(), vs_ip)
+    # We have a path -- install it
+    self._install_path(p, match, event.ofp)
 
-    else:
-      log.debug("Installing path for %s -> %s %04x (%i hops)",
-          match.dl_src, match.dl_dst, match.dl_type, len(p))
-
-      # We have a path -- install it
-      self._install_path(p, match, event.ofp)
-
-      # Now reverse it and install it backwards
-      # (we'll just assume that will work)
-      p = [(sw,out_port,in_port) for sw,in_port,out_port in p]
-      self._install_path(p, match.flip())
+    # Now reverse it and install it backwards
+    # (we'll just assume that will work)
+    p = [(sw,out_port,in_port) for sw,in_port,out_port in p]
+    self._install_path(p, match.flip())
 
 
   def _handle_PacketIn (self, event):
@@ -460,25 +505,36 @@ class Switch (EventMixin):
         #return
 
     # Eat ARP replies from real servers on initialization
-    from pox.lib.packet import arp
-    from pox.lib.packet.ethernet import ETHER_ANY
-    from pox.lib.addresses import IP_ANY
-    if (packet.find('arp') and packet.next.opcode == arp.REPLY and
-        packet.next.protodst == IP_ANY and
-        packet.next.hwdst == ETHER_ANY):
+    if (packet.find('arp') and (packet.next.opcode == arp.REPLY) and
+        (packet.next.protosrc in real_servers)):
       return
 
     if packet.dst.is_multicast:
       log.debug("Flood multicast from %s", packet.src)
       flood()
     else:
-      if packet.dst not in mac_map:
-        log.debug("%s unknown -- flooding" % (packet.dst,))
-        flood()
-      else:
-        dest = mac_map[packet.dst]
+      if (packet.find('ipv4') and (packet.next.dstip == virtual_server)):
+        log.debug("packet to virtual services from %s.%i", dpid_to_str(event.dpid), event.port)
+        real_server = core.ssched.get_real_server()
+        if real_server is not None:
+          ip, mac = real_server
+          log.debug("REAL SERVER: %s, %s", str(ip), str(mac))
+        else:
+          log.debug("no server available")
+        if mac not in mac_map:
+          log.debug("real server mac %s unknown" % (mac))
+          flood()
+        dest = mac_map[mac] # real server's location
         match = of.ofp_match.from_packet(packet)
-        self.install_path(dest[0], dest[1], match, event)
+        self.install_path2(dest[0], dest[1], match, event, ip, mac)
+      else:
+        if packet.dst not in mac_map:
+          log.debug("%s unknown -- flooding" % (packet.dst,))
+          flood()
+        else:
+            dest = mac_map[packet.dst]
+            match = of.ofp_match.from_packet(packet)
+            self.install_path(dest[0], dest[1], match, event)
 
   def disconnect (self):
     if self.connection is not None:
@@ -521,9 +577,9 @@ class l2_multi (EventMixin):
     def startup ():
       core.openflow.addListeners(self, priority=0)
       core.openflow_discovery.addListeners(self)
-      core.openflow_link_monitor.addListeners(self)
+      core.lblm.addListeners(self)
     core.call_when_ready(startup, ('openflow','openflow_discovery',
-                                   'openflow_link_monitor'))
+                                   'lblm'))
 
   def _handle_LinkStatsUpdated (self, event):
     _calc_paths()
@@ -609,13 +665,15 @@ class l2_multi (EventMixin):
     wp.notify(event)
 
 
-def launch (virtual_servers = "", **kw):
-  global virtual_server, real_servers
-  virtual_server = [IPAddr(x) for x in
-                    virtual_servers.replace(",", " ").split()]
-  for mac, ip in kw.iteritems():
-    real_servers[EthAddr(mac)] = IPAddr(ip)
+#def launch (virtual_servers = "", **kw):
+def launch (ip, servers = [], bandwidth=BANDWIDTH):
+  global virtual_server, real_servers, BANDWIDTH
+  virtual_server = IPAddr(ip)
+  real_servers = [IPAddr(x) for x in servers.replace(',', ' ').split()]
+  BANDWIDTH = int(bandwidth)
+  #[IPAddr(x) for x in
+                    #virtual_servers.replace(",", " ").split()]
   core.registerNew(l2_multi)
 
-  timeout = min(max(PATH_SETUP_TIME, 5) * 2, 15)
+  timeout = min(max(PATH_SETUP_TIME, 5) * 2, 15) 
   Timer(timeout, WaitingPath.expire_waiting_paths, recurring=True)
